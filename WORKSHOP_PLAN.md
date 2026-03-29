@@ -1,291 +1,426 @@
 # Workshop: Build an AI Screen Assistant
 
-**Duration:** ~45 minutes + open hacking time
+**Duration:** ~60–75 min (live build) + open hacking time
 **Audience:** CS students with Python experience
-**Focus:** AI integration patterns & agent routing logic
+**Format:** Progressive live build — each stage reveals a problem, then you fix it
+**Goal:** Build a personal assistant that sees your screen, searches the web, remembers context, knows your documents, and takes actions
 
 ---
 
-## Overview
+## The Arc
 
-In this workshop, you'll learn how a local desktop assistant uses AI to answer questions about what's on your screen. The app captures a screenshot, decides whether to analyze the image or search the web, and returns a concise answer — all in a few seconds.
+```
+Stage 1: "It can't see"          → Wire up vision          → now it sees your screen
+Stage 2: "It hallucinates"       → Add web search + routing → now it uses the right tool
+Stage 3: "Routing is dumb"       → LLM-based classification → now it understands intent
+Stage 4: "It forgets everything" → Conversation memory      → now follow-ups work
+Stage 5: "It doesn't know me"    → RAG pipeline             → now it reads your docs
+Stage 6: "It can't do anything"  → MCP tool integration     → now it takes actions
+```
 
-By the end, you'll understand how to wire up LLM APIs for vision and search, how to build a simple agent that routes between tools, and how to extend the system with your own capabilities.
+---
+
+## What's Pre-Built vs. What Students Build
+
+**Already working (helpers — don't touch):**
+
+| File | What it does |
+|------|-------------|
+| `main.py` | FastAPI server + PyWebView overlay, all endpoints, window management |
+| `assistant/overlay/index.html` | The floating dark-mode UI |
+| `assistant/capture.py` | Screenshot capture service |
+| `assistant/recorder.py` | Audio recording |
+| `assistant/speech.py` | Whisper transcription |
+| `assistant/vision.py` | Groq vision API call (already supports `history` param) |
+| `assistant/search.py` | Groq web search API call |
+| `assistant/helpers/chat.py` | Generic `ask_groq_chat()` — used for LLM classification |
+| `assistant/helpers/rag.py` | `index_documents()` + `retrieve_context()` — ChromaDB + sentence-transformers |
+| `assistant/helpers/mcp_tools.py` | `ask_with_tools()` + `execute_tool()` — tool definitions and dispatcher |
+
+**Students build:** `assistant/agent.py` — the brain. They uncomment TODOs and add logic stage by stage.
 
 ---
 
 ## Pre-Workshop Setup (5 min)
 
-Have participants do this before the session starts (or in the first 5 minutes):
-
 1. Clone the repo and `cd` into it
-2. Create a `.env` file with a Groq API key:
+2. Create `.env` with a Groq API key (free at [console.groq.com](https://console.groq.com)):
    ```
    GROQ_API_KEY=gsk_your_key_here
    ```
-   > Free keys at [console.groq.com](https://console.groq.com)
 3. Install dependencies:
    ```bash
-   pip install fastapi uvicorn pywebview mss pillow httpx python-dotenv python-multipart sounddevice numpy
+   pip install fastapi uvicorn pywebview mss pillow httpx python-dotenv python-multipart sounddevice numpy chromadb sentence-transformers pymupdf
    ```
-4. Test it works: `python main.py` — a floating overlay should appear
+4. Run `python main.py` — overlay appears, but asking a question fails
 
 ---
 
-## Part 1: The AI Layer (15 min)
+## Stage 1: Vision — "It Can't See" (~8 min)
 
-**Goal:** Understand how the app talks to an LLM with both text and images.
+**The problem:** Run the app. Ask "What's on my screen?" It crashes or returns a placeholder — the app captures a screenshot but has no idea what to do with it.
 
-### 1.1 — Vision: Asking an LLM About a Screenshot
+**The fix:** In `agent.py`, wire up `answer_question()` to call the pre-built `ask_groq_vision()` helper with the screenshot bytes and the user's question.
 
-Open `assistant/vision.py` and walk through it together.
+**What to teach:** Multimodal messages (text + image in one API call), image preprocessing (the compression loop in `_prepare_image_data_url` that gets screenshots under 4MB), the OpenAI-compatible API format (Groq, OpenAI, and others all use the same `/v1/chat/completions` endpoint), and temperature (0.2 = factual and consistent).
 
-**Key concepts to teach:**
+**Demo:** Ask "What app is open?" — it sees the screen and answers correctly.
 
-- **Multimodal messages** — LLMs can accept both text and images in a single request. The message payload looks like:
-  ```python
-  messages = [
-      {"role": "system", "content": system_prompt},
-      {"role": "user", "content": [
-          {"type": "text", "text": user_prompt},
-          {"type": "image_url", "image_url": {"url": data_url}}
-      ]}
-  ]
-  ```
-- **Image preprocessing matters** — Screenshots are huge. The code resizes to 1600×1600 max and compresses JPEG quality in a loop until it fits under 4MB. This is a real-world constraint worth highlighting.
-- **The API is OpenAI-compatible** — Groq (and many other providers) use the same `/v1/chat/completions` endpoint format. Point out that switching providers is mostly just changing the base URL and model name.
-- **Temperature = 0.2** — Low temperature for factual, consistent answers. Good time to briefly explain what temperature does.
-
-**Live demo:** Run the app, ask "What app is open on my screen?" and show the screenshot → answer flow.
-
-### 1.2 — Web Search: When Vision Isn't Enough
-
-Open `assistant/search.py`.
-
-**Key concepts to teach:**
-
-- **Tool use / function calling** — The `compound-mini` model has built-in web search. The code enables it via:
-  ```python
-  "compound_custom": {"tools": {"enabled_tools": ["web_search"]}}
-  ```
-  The model decides *on its own* when and what to search. This is a simple but powerful example of tool use.
-- **Different models for different jobs** — Vision uses a large multimodal model (Llama 4 Scout 17B). Search uses a smaller, tool-augmented model. Picking the right model for the task is a core engineering decision.
-
-**Live demo:** Ask "What's the weather today?" and show it routes to web search instead of analyzing the screenshot.
-
----
-
-## Part 2: The Agent Layer (15 min)
-
-**Goal:** Understand the routing logic that makes this an *agent* rather than just an API wrapper.
-
-### 2.1 — What Makes This an "Agent"?
-
-Open `assistant/agent.py`. This is the brain of the app.
-
-**Key concept:** An agent is code that *decides what to do* based on the input, rather than always doing the same thing. Here, the agent chooses between two tools: vision analysis and web search.
-
-Walk through the `ScreenAssistantAgent` class:
-
-```
-User question
-    ↓
-needs_web_search(question)?
-    ├── YES → ask_groq_web_search()   (live data from the web)
-    └── NO  → capture screen → ask_groq_vision()  (analyze what's on screen)
-```
-
-### 2.2 — The Routing Decision
-
-Look at `needs_web_search()` together:
-
+**Code — students fill in `answer_question()`:**
 ```python
-def needs_web_search(self, question: str) -> bool:
-    q = question.lower()
-    web_keywords = ["today", "latest", "current", "news", "weather", ...]
-    if any(kw in q for kw in web_keywords):
-        return True
-    web_patterns = [r"\bbest\b", r"\brecommend", r"\bcheapest\b", ...]
-    return any(re.search(p, q) for p in web_patterns)
-```
-
-**Discussion points:**
-
-- **Rule-based vs. LLM-based routing** — This uses keywords and regex. It's fast and free (no API call). But it's brittle — "What's the best font on my screen?" would incorrectly route to web search. Ask students: how would you improve this?
-- **The alternative: use an LLM to route** — You could send the question to a cheap/fast model and ask "Does this need web search or screen analysis?" More accurate, but adds latency and cost. This is a real tradeoff engineers make.
-- **Agent = decision + action** — The routing logic is the "decision" part. The vision/search modules are the "action" part. Even simple agents follow this pattern.
-
-### 2.3 — The Full Flow
-
-Walk through `answer_question()`:
-
-```python
-async def answer_question(self, question, capture):
-    if self.needs_web_search(question):
-        answer = ask_groq_web_search(self.api_key, question)
-        return AgentResult(answer=answer, model="compound-mini")
-
-    png_bytes = capture.png_bytes
-    answer = ask_groq_vision(self.api_key, self.model,
-                             self.system_prompt, question, png_bytes)
+def answer_question(self, *, question: str, capture: CaptureResult) -> AgentResult:
+    user_prompt = (
+        f"User question: {question}\n"
+        f"Screenshot timestamp: {capture.captured_at}\n"
+        "Answer naturally and prioritize being helpful."
+    )
+    answer = ask_groq_vision(
+        api_key=self.api_key,
+        model=self.model,
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=user_prompt,
+        screenshot_png_bytes=capture.png_bytes,
+    )
     return AgentResult(answer=answer, model=self.model)
 ```
 
-**Point out:** The caller doesn't need to know *how* the answer was generated. The agent abstracts the routing. This is a clean pattern that scales — you can add more tools without changing the interface.
+---
+
+## Stage 2: Web Search + Routing — "It Hallucinates" (~8 min)
+
+**The problem:** Ask "What's the weather in Austin today?" It stares at the screenshot and makes something up. Vision models have zero access to live data.
+
+**The fix:** Add `ask_groq_web_search()` as a second tool and write `needs_web_search()` — a simple keyword/regex check that routes time-sensitive questions to search instead of vision.
+
+**What to teach:** This is what makes it an *agent* — it decides which tool to use instead of always doing the same thing. Point out that `compound-mini` has built-in web search via `compound_custom.tools`, and that different models are better for different jobs (large multimodal model for vision, small tool-augmented model for search).
+
+**Demo:** Ask "What's the weather today?" — routes to search, returns live data. Ask "What color is this button?" — routes to vision.
+
+**Code — students add routing:**
+```python
+def needs_web_search(self, question: str) -> bool:
+    q = question.lower()
+    if any(term in q for term in WEB_SEARCH_TERMS):
+        return True
+    if re.search(r"\b(best|recommend|compare|cheapest|near me)\b", q):
+        return True
+    return False
+
+def answer_question(self, *, question: str, capture: CaptureResult) -> AgentResult:
+    if self.needs_web_search(question):
+        answer = ask_groq_web_search(api_key=self.api_key, question=question)
+        return AgentResult(answer=answer, model="groq/compound-mini")
+    # ... existing vision code ...
+```
 
 ---
 
-## Part 3: How It All Connects (5 min)
+## Stage 3: Smarter Routing — "Routing Is Dumb" (~8 min)
 
-Quick walkthrough of `main.py` to show the glue:
+**The problem:** Ask "What's the best font on my screen?" It routes to web search because "best" is a keyword — but the user is asking about something *on screen*. Keywords are fast and free but miss nuance.
 
-- **FastAPI server** serves the UI and handles `/ask` and `/voice` endpoints
-- **PyWebView** creates the floating desktop overlay
-- The `/ask` endpoint captures a screenshot, passes it + the question to the agent, returns the answer
-- The UI (`assistant/overlay/index.html`) is a simple HTML/JS frontend that calls these endpoints
+**The fix:** Uncomment the `ask_groq_chat` import from `assistant.helpers` and write a `classify_question()` method that sends the question to the same model with a one-line classification prompt: "Classify as 'vision' or 'search'. One word only." Replace `needs_web_search()` with this classifier.
 
-This part is quick — the point is just to show how the AI/agent pieces plug into a real app.
+**What to teach:** Rule-based vs. LLM-based routing (the core tradeoff: speed/cost vs. accuracy), prompt engineering for classification (constrained output, low temperature), and the concept of LLM-as-judge — using a model to make decisions, not just generate text.
+
+**Demo:** "What's the best font on my screen?" now correctly routes to vision. "What's the best restaurant near me?" still routes to search.
+
+**Code — students write the classifier:**
+```python
+from assistant.helpers import ask_groq_chat
+
+def classify_question(self, question: str) -> str:
+    response = ask_groq_chat(
+        api_key=self.api_key,
+        model=self.model,
+        messages=[
+            {"role": "system", "content": (
+                "Classify this question as 'vision' (needs to see the screen) "
+                "or 'search' (needs live web data). Reply with one word only."
+            )},
+            {"role": "user", "content": question},
+        ],
+        temperature=0.0,
+        max_tokens=10,
+    )
+    return "search" if "search" in response.lower() else "vision"
+```
+
+---
+
+## Stage 4: Conversation Memory — "It Forgets Everything" (~10 min)
+
+**The problem:** Ask "What color is the button in the top right?" — answers correctly. Then ask "Make it darker" — it has no idea what "it" refers to. Every question is completely independent.
+
+**The fix:** Uncomment the `conversation_history` list in `__init__`. After each Q&A, append user and assistant messages. Pass the history to `ask_groq_vision()` (which already accepts a `history` parameter). Cap at the last 10 exchanges so you don't overflow the context window.
+
+**What to teach:** LLMs are stateless — every request starts from scratch. "Memory" is an illusion created by appending history to every call (this is exactly what ChatGPT does). Context windows have a token limit, which is why we cap history. Show what happens if you don't: the context overflows and older messages get truncated or the request fails.
+
+**Demo:** "What color is the button?" → Answers. "Make it darker" → Now understands the reference.
+
+**Code — students uncomment and wire up:**
+```python
+# In __init__:
+self.conversation_history: list[dict] = []
+self.max_history = 10
+
+# In answer_question(), after getting the answer:
+answer = ask_groq_vision(..., history=self.conversation_history)
+
+self.conversation_history.append({"role": "user", "content": question})
+self.conversation_history.append({"role": "assistant", "content": answer})
+if len(self.conversation_history) > self.max_history * 2:
+    self.conversation_history = self.conversation_history[-(self.max_history * 2):]
+```
+
+---
+
+## Stage 5: RAG — "It Doesn't Know Me" (~12 min)
+
+**The problem:** Ask "What did Professor Smith say about recursion in lecture 3?" It has no idea. It can see your screen and search the web, but knows nothing about *your* documents, notes, or files.
+
+**The fix:** Import `index_documents` and `retrieve_context` from `assistant.helpers`. Call `index_documents()` at startup to scan a docs folder. Update the classifier to return a third category: `"docs"`. When the route is `"docs"`, call `retrieve_context(question, top_k=3)` to get relevant chunks, then inject them into the prompt as context before calling the vision model.
+
+**What to teach:** Why RAG exists (LLMs know public knowledge, not *your* stuff). Walk through the pipeline using the helper code: documents → chunks (the `_chunk_text` function splits by character count with overlap) → embeddings via `all-MiniLM-L6-v2` (text as vectors — similar meaning = close in space) → stored in ChromaDB → retrieved by cosine similarity → stuffed into the prompt as context. The LLM doesn't "know" your docs — it's reading them on the fly.
+
+**Demo:** Drop a few class note PDFs or text files into a `docs/` folder. Ask a question about them — retrieves the relevant section and answers.
+
+**Code — students add the docs route:**
+```python
+from assistant.helpers import index_documents, retrieve_context
+
+# In answer_question(), extend the classifier prompt to include "docs":
+# "Classify as 'vision', 'search', or 'docs' (user's personal documents)."
+
+# Add the docs route:
+elif route == "docs":
+    context_chunks = retrieve_context(question, top_k=3)
+    context = "\n---\n".join(context_chunks)
+    augmented_prompt = (
+        f"Use this context from the user's documents:\n\n{context}\n\n"
+        f"Question: {question}"
+    )
+    answer = ask_groq_vision(
+        api_key=self.api_key,
+        model=self.model,
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=augmented_prompt,
+        screenshot_png_bytes=capture.png_bytes,
+        history=self.conversation_history,
+    )
+```
+
+```python
+# In main.py startup, add:
+from assistant.helpers import index_documents
+docs_folder = Path(__file__).parent / "docs"
+if docs_folder.exists():
+    count = index_documents(str(docs_folder))
+    print(f"Indexed {count} document chunks for RAG")
+```
+
+---
+
+## Stage 6: MCP — "It Can't Do Anything" (~10 min)
+
+**The problem:** The assistant is now smart — sees, searches, remembers, knows your docs. But ask "Remind me to review my notes at 5pm" or "Save this as a note" — it can only *answer* questions, never *take actions*.
+
+**The fix:** Import `ask_with_tools` and `execute_tool` from `assistant.helpers`. Extend the classifier to return `"action"` for imperative requests. When the route is `"action"`, send the question + tool definitions to the LLM. If it returns a tool call, parse the structured arguments and execute the tool. The helpers already define two tools: `create_reminder` (saves to `reminders.json`) and `save_note` (writes to a `notes/` folder).
+
+**What to teach:** What MCP is (a standard protocol for connecting LLMs to tools — like USB for AI). How function calling works: the LLM sees tool descriptions, chooses which one to call, and outputs structured JSON arguments; your code executes the tool and returns the result. Show the tool definition format in `mcp_tools.py`. This is the core pattern behind every AI agent — decide → call tool → observe result → respond.
+
+**Demo:** "Remind me to review my notes at 5pm" → LLM picks `create_reminder`, outputs `{"title": "review my notes", "time": "5pm"}`, tool writes to `reminders.json`, user sees confirmation.
+
+**Code — students add the action route:**
+```python
+from assistant.helpers import ask_with_tools, execute_tool
+
+# Add "action" to the classifier prompt:
+# "Classify as 'vision', 'search', 'docs', or 'action' (user wants to DO something)."
+
+# Add the action route:
+elif route == "action":
+    response = ask_with_tools(
+        api_key=self.api_key,
+        model=self.model,
+        question=question,
+    )
+    if response.tool_call:
+        result = execute_tool(response.tool_call)
+        return AgentResult(answer=f"Done! {result}", model=self.model)
+    return AgentResult(answer=response.text or "I wasn't sure what action to take.", model=self.model)
+```
 
 ---
 
 ## Recap (2 min)
 
-Three things to remember:
+Six concepts, one per stage:
 
-1. **LLMs are APIs** — Vision, search, and transcription are all just HTTP calls with different payloads. The OpenAI-compatible format is the lingua franca.
-2. **Agents decide, then act** — Even a simple if/else router counts. The pattern is: inspect input → choose a tool → call it → return the result.
-3. **Engineering is about tradeoffs** — Rule-based vs. LLM routing. Big model vs. small model. Accuracy vs. speed vs. cost.
+| Stage | Concept | One-liner |
+|-------|---------|-----------|
+| 1 | Multimodal AI | LLMs can see images, not just read text |
+| 2 | Agent routing | Deciding *which* tool to use is the core of an agent |
+| 3 | LLM-as-judge | Use a model to make decisions, not just generate content |
+| 4 | Context management | Memory is manual — you control what the model sees |
+| 5 | RAG | Give LLMs access to private knowledge through retrieval |
+| 6 | Tool use / MCP | Let LLMs take actions, not just answer questions |
 
 ---
 
 ## Extension Paths
 
-These are independent tracks participants can follow after the workshop. Each one adds a new capability to the assistant.
+Independent tracks for after the workshop. Pick one and hack on it.
 
 ---
 
-### Path A: Smarter Routing with an LLM
+### Action Modes
 
-**Difficulty:** ⭐ Easy | **Time:** 30 min | **Concepts:** Prompt engineering, classification
+**Difficulty:** ⭐ | **Concepts:** Intent classification, prompt templates
 
-**What you'll do:** Replace the keyword-based `needs_web_search()` with an LLM call that classifies the question.
-
-**Steps:**
-1. In `agent.py`, create a new method `classify_question()` that sends the user's question to a fast model (e.g., `llama-3.1-8b-instant` on Groq)
-2. Use a system prompt like:
-   ```
-   Classify this question as either "vision" (needs to look at the screen)
-   or "search" (needs live web data). Reply with one word only.
-   ```
-3. Replace the `needs_web_search()` call in `answer_question()` with your classifier
-4. Test with edge cases: "What's the best font on my screen?" should now route to vision
-
-**Stretch:** Add a third category — "general knowledge" — that answers from the LLM's training data without a screenshot or web search (saves time and tokens).
+Add quick-action buttons: **Summarize**, **Explain**, **Find bug**, **Draft reply**, **What should I click?** Each mode uses a specialized prompt template instead of the generic one. Detect the mode from the UI (button clicks) or from the question itself. Teaches how the same model produces wildly different outputs depending on the prompt, and how production assistants handle diverse intents.
 
 ---
 
-### Path B: Add Memory / Conversation History
+### Web + Screen Combined Mode
 
-**Difficulty:** ⭐⭐ Medium | **Time:** 45 min | **Concepts:** State management, context windows
+**Difficulty:** ⭐⭐ | **Concepts:** Multi-tool fusion, context synthesis
 
-**What you'll do:** Make the assistant remember previous Q&A pairs so you can have a conversation.
-
-**Steps:**
-1. Add a `conversation_history: list` to `ScreenAssistantAgent`
-2. After each Q&A, append `{"role": "user", "content": question}` and `{"role": "assistant", "content": answer}`
-3. In `vision.py`, modify `ask_groq_vision()` to accept and include history in the messages array
-4. Cap history at the last 5 exchanges to stay within token limits
-5. Add a "Clear" button in the overlay UI
-
-**Stretch:** Only include history when the question seems like a follow-up (e.g., starts with "what about", "and", "also"). Use an LLM or simple heuristics to decide.
+For questions like "Is this a good deal?" use *both* the screenshot and web search. Capture what's on screen, extract the claim or product, search the web for context, then synthesize both sources into one answer. Teaches multi-source reasoning and how real agents chain tools together — the next step beyond single-tool routing.
 
 ---
 
-### Path C: Add a New Tool — File/Code Analysis
+### Draft Replies
 
-**Difficulty:** ⭐⭐ Medium | **Time:** 1 hour | **Concepts:** Tool use, agent architecture
+**Difficulty:** ⭐⭐ | **Concepts:** Prompt engineering, tone control
 
-**What you'll do:** Add a third tool that reads and analyzes files from your computer.
-
-**Steps:**
-1. Create `assistant/files.py` with a function `analyze_file(api_key, file_path, question)`
-2. It should read the file contents and send them to an LLM with the user's question
-3. In `agent.py`, add file-related keywords to routing (e.g., "this file", "my code", "the document")
-4. Add a new route — or modify the routing logic to detect when a question is about a file
-5. For bonus points, let the user drag-and-drop a file onto the overlay
-
-**Stretch:** Support multiple file types — use different prompts for code files vs. PDFs vs. images.
+Detect when the screen shows an email, Slack message, or chat. Auto-generate a reply draft based on the conversation visible on screen. Teaches advanced prompt engineering (tone matching, format constraints, context extraction from screenshots) and practical AI-assisted writing.
 
 ---
 
-### Path D: RAG — Give It Your Documents
+### Task Extraction
 
-**Difficulty:** ⭐⭐⭐ Hard | **Time:** 1.5 hours | **Concepts:** Embeddings, vector search, RAG
+**Difficulty:** ⭐⭐ | **Concepts:** Structured output, entity extraction
 
-**What you'll do:** Let the assistant answer questions from a folder of your PDFs/notes using Retrieval-Augmented Generation.
-
-**Steps:**
-1. Install: `pip install chromadb sentence-transformers pymupdf`
-2. Create `assistant/rag.py`:
-   - Write an `index_documents(folder_path)` function that reads PDFs, chunks text, and stores embeddings in ChromaDB
-   - Write a `retrieve(query, top_k=3)` function that finds the most relevant chunks
-3. In `agent.py`, add a `needs_document_search()` check (or extend the LLM classifier from Path A)
-4. When triggered, retrieve relevant chunks and include them in the LLM prompt as context
-5. Add a startup step in `main.py` to index a `~/documents` folder
-
-**Stretch:** Show which document and page the answer came from. Add re-ranking for better retrieval quality.
+Analyze meeting notes, docs, or tickets visible on screen. Extract TODOs, deadlines, and action items as structured JSON. Teaches how to get the model to output structured data (not just prose) and how to validate and parse LLM outputs reliably. Pairs well with the MCP tools from Stage 6.
 
 ---
 
-### Path E: Multi-Step Agent with Planning
+### OCR Text Extraction
 
-**Difficulty:** ⭐⭐⭐ Hard | **Time:** 1.5 hours | **Concepts:** Agentic loops, planning, tool chaining
+**Difficulty:** ⭐ | **Concepts:** Preprocessing pipelines
 
-**What you'll do:** Turn the single-step agent into one that can break down complex questions and use multiple tools in sequence.
-
-**Steps:**
-1. Define your tools as a list of descriptions:
-   ```python
-   tools = [
-       {"name": "screen_vision", "description": "Analyze what's on screen"},
-       {"name": "web_search", "description": "Search the web for current info"},
-       {"name": "file_read", "description": "Read and analyze a local file"},
-   ]
-   ```
-2. Create a `plan()` method that sends the question + tool descriptions to an LLM and asks it to output a plan (list of steps with tool names)
-3. Create an `execute_plan()` method that runs each step, feeding results into the next
-4. Handle the case where the LLM's plan doesn't make sense (validation, retries)
-
-**Example:** "Compare what's on my screen to the latest version of this library's docs" → Step 1: screen_vision → Step 2: web_search → Step 3: synthesize
-
-**Stretch:** Add a `reflect()` step where the agent reviews its own answer and decides if it needs to try again.
+Run OCR (Tesseract or EasyOCR) on the screenshot *before* sending it to the vision model. Include the extracted text alongside the image. This dramatically improves accuracy for code, dashboards, spreadsheets, and error messages — vision models understand layout but often misread small text. Teaches how preprocessing improves output quality.
 
 ---
 
-### Path F: Voice Output (Text-to-Speech)
+### Screen Region Selection
 
-**Difficulty:** ⭐ Easy | **Time:** 30 min | **Concepts:** TTS APIs, async audio
+**Difficulty:** ⭐⭐ | **Concepts:** Input refinement, accuracy tradeoffs
 
-**What you'll do:** Make the assistant speak its answers out loud.
-
-**Steps:**
-1. Create `assistant/tts.py` using Groq's or another provider's TTS endpoint
-2. After getting an answer in `main.py`, send it to TTS and play the audio
-3. Use `sounddevice` (already installed) to play the WAV/PCM output
-4. Add a toggle in the UI to enable/disable voice output
-
-**Stretch:** Stream the audio so the voice starts before the full answer is generated.
+Let the user drag-select a region instead of sending the full screenshot. Smaller, focused images = more accurate answers and fewer tokens. Requires UI changes (drag overlay) and cropping logic. Teaches how input quality directly affects output quality — a principle that applies everywhere in AI.
 
 ---
 
-## Quick Reference: Key Files
+### Persistent Note Memory
 
-| File | What It Does | Lines |
-|------|-------------|-------|
-| `assistant/agent.py` | Agent routing — decides vision vs. search | ~116 |
-| `assistant/vision.py` | Sends screenshot + question to Groq vision API | ~75 |
-| `assistant/search.py` | Web search via Groq compound-mini | ~51 |
-| `assistant/speech.py` | Audio transcription via Whisper | ~37 |
-| `assistant/capture.py` | Takes screenshots using `mss` | ~47 |
-| `main.py` | FastAPI server + PyWebView overlay | ~280 |
-| `assistant/overlay/index.html` | The floating UI | ~339 |
+**Difficulty:** ⭐⭐ | **Concepts:** Long-term state, preference learning
+
+Save user preferences (tone, work context, recurring tasks) to a JSON file. Load them into the system prompt on startup. Over time the assistant "learns" you. Teaches the difference between conversation memory (Stage 4 — short-term, in-context) and persistent memory (long-term, stored externally).
+
+---
+
+### Local Screenshot History
+
+**Difficulty:** ⭐⭐ | **Concepts:** Temporal context, multi-image reasoning
+
+Keep the last 5–10 screenshots in a ring buffer. Enable questions like "What changed?" or "Go back to what I was looking at." Teaches temporal reasoning and managing multiple images in a context window — useful for monitoring, debugging, and workflow tracking.
+
+---
+
+### Voice Output (TTS)
+
+**Difficulty:** ⭐ | **Concepts:** TTS APIs, streaming audio
+
+Add text-to-speech so the assistant speaks answers out loud. Use Groq's or another provider's TTS endpoint. `sounddevice` is already installed for playback. Completes the voice loop (speak → transcribe → think → speak back). Easy win that makes the app feel polished.
+
+---
+
+### Read-This-Page Mode
+
+**Difficulty:** ⭐ | **Concepts:** Zero-input UX, prompt design
+
+One-click button that captures the screen and generates a summary — no typing required. Just a specialized prompt ("Summarize everything visible on this screen") and a new UI button. Simple but teaches how UX decisions and prompt design work together.
+
+---
+
+### Clipboard Awareness
+
+**Difficulty:** ⭐ | **Concepts:** Multi-source context
+
+Read clipboard text and combine it with the screenshot. "Explain this error" works much better when the error text comes from the clipboard (exact) rather than OCR'd from a screenshot (approximate). Small feature, big accuracy boost for developer workflows.
+
+---
+
+### Calendar & Reminders (via MCP)
+
+**Difficulty:** ⭐⭐ | **Concepts:** MCP in practice, real API integration
+
+Extend the MCP tools from Stage 6 with real calendar integration (Google Calendar API or a local store). The `create_reminder` tool already saves to JSON — upgrade it to actually schedule notifications or create calendar events. Teaches end-to-end MCP tool implementation.
+
+---
+
+### App-Specific Helpers
+
+**Difficulty:** ⭐⭐ | **Concepts:** Dynamic prompting, context detection
+
+Detect which app is in focus (Gmail, VS Code, Slack, etc.) and swap in a specialized system prompt. For Gmail: prioritize email summarization. For VS Code: prioritize code explanation and bug finding. Teaches dynamic prompt selection and context-aware behavior.
+
+---
+
+### Hotkeys
+
+**Difficulty:** ⭐ | **Concepts:** System integration, UX
+
+Add global keyboard shortcuts (via `pynput`) to summon the overlay, trigger voice recording, or run a quick summarize. Not AI-focused but makes the tool actually usable day-to-day.
+
+---
+
+## Quick Reference
+
+### Key Files
+
+| File | Role | Students edit? |
+|------|------|:-:|
+| `assistant/agent.py` | The brain — routing, memory, RAG, MCP | Yes — this is the main file |
+| `assistant/vision.py` | Vision API call (supports `history` param) | No |
+| `assistant/search.py` | Web search API call | No |
+| `assistant/helpers/chat.py` | Generic chat call (for classifier) | No — use as-is |
+| `assistant/helpers/rag.py` | Chunking + embedding + retrieval | No — call from agent |
+| `assistant/helpers/mcp_tools.py` | Tool definitions + executor | No — call from agent |
+| `assistant/capture.py` | Screenshot service | No |
+| `assistant/speech.py` | Whisper transcription | No |
+| `assistant/recorder.py` | Audio recording | No |
+| `main.py` | Server + overlay + endpoints | Minor (add RAG startup) |
+| `assistant/overlay/index.html` | Floating UI | No (unless extending UI) |
+
+### Models Used
+
+| Task | Model | Why |
+|------|-------|-----|
+| Vision | `meta-llama/llama-4-scout-17b-16e-instruct` | Large multimodal, strong image understanding |
+| Web search | `groq/compound-mini` | Small, has built-in web search tool |
+| Classification | `meta-llama/llama-4-scout-17b-16e-instruct` | Fast + accurate for short tasks |
+| Transcription | `whisper-large-v3-turbo` | Fast speech-to-text |
+| Embeddings (RAG) | `all-MiniLM-L6-v2` (local) | Lightweight, no API needed |
+
+### Stage Summary
+
+| # | Problem shown | Fix applied | Concept |
+|---|--------------|-------------|---------|
+| 1 | Can't see the screen | Wire up `ask_groq_vision()` | Multimodal LLMs |
+| 2 | Hallucinates live data | Add `ask_groq_web_search()` + keyword routing | Agent = decide + act |
+| 3 | Routing misclassifies | `classify_question()` via `ask_groq_chat()` | LLM-as-judge |
+| 4 | No follow-up context | `conversation_history` list + pass to vision | Context windows |
+| 5 | Doesn't know your docs | `index_documents()` + `retrieve_context()` | RAG pipeline |
+| 6 | Can't take actions | `ask_with_tools()` + `execute_tool()` | Tool use / MCP |
