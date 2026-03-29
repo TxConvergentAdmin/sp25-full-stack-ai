@@ -7,6 +7,8 @@ These are real implementations that actually perform actions (save files, etc.).
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +65,23 @@ TOOLS = [
                     },
                 },
                 "required": ["title", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app",
+            "description": "Open an application on the user's computer. Use this when the user asks to open or launch an app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The name of the app to open (e.g., 'Spotify', 'Chrome', 'Terminal')",
+                    },
+                },
+                "required": ["name"],
             },
         },
     },
@@ -149,6 +168,40 @@ def _save_note(title: str, content: str) -> str:
     return f"Note saved: {filename}"
 
 
+def _open_app(name: str) -> str:
+    """Open an application by name.
+
+    Args:
+        name: The name of the app to open.
+
+    Returns:
+        Confirmation or error message.
+    """
+    try:
+        if sys.platform == "darwin":
+            result = subprocess.run(
+                ["open", "-a", name], capture_output=True, timeout=5
+            )
+        elif sys.platform == "win32":
+            result = subprocess.run(
+                ["cmd", "/c", "start", "", name], shell=True, capture_output=True, timeout=5
+            )
+        else:
+            result = subprocess.run(
+                ["xdg-open", name], capture_output=True, timeout=5
+            )
+
+        if result.returncode != 0:
+            error = result.stderr.decode().strip()
+            return f"Failed to open '{name}': {error or 'unknown error'}"
+
+        return f"Opened app: '{name}'"
+    except subprocess.TimeoutExpired:
+        return f"Failed to open '{name}': command timed out"
+    except Exception as e:
+        return f"Failed to open '{name}': {e}"
+
+
 def execute_tool(tool_call: ToolCall) -> str:
     """Execute a tool call and return the result.
 
@@ -170,6 +223,10 @@ def execute_tool(tool_call: ToolCall) -> str:
         return _save_note(
             title=tool_call.arguments.get("title", ""),
             content=tool_call.arguments.get("content", ""),
+        )
+    elif tool_call.name == "open_app":
+        return _open_app(
+            name=tool_call.arguments.get("name", ""),
         )
     else:
         raise ValueError(f"Unknown tool: {tool_call.name}")

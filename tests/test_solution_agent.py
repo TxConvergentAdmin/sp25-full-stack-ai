@@ -116,6 +116,33 @@ class SolutionAgentTests(unittest.TestCase):
             ],
         )
 
+    @patch("assistant.solution_agent.execute_tool", return_value="Opened app: 'Spotify'")
+    @patch(
+        "assistant.solution_agent.ask_with_tools",
+        return_value=SimpleNamespace(
+            text=None,
+            tool_call=SimpleNamespace(name="open_app", arguments={"name": "Spotify"}),
+        ),
+    )
+    @patch("assistant.solution_agent.ask_groq_chat", return_value="action")
+    def test_action_route_opens_app(
+        self,
+        mock_chat,
+        mock_ask_with_tools,
+        mock_execute_tool,
+    ) -> None:
+        result = self.agent.answer_question(question="Open Spotify", capture=self.capture)
+
+        self.assertEqual(result.answer, "Done! Opened app: 'Spotify'")
+        mock_execute_tool.assert_called_once()
+        self.assertEqual(
+            self.agent.conversation_history[-2:],
+            [
+                {"role": "user", "content": "Open Spotify"},
+                {"role": "assistant", "content": "Done! Opened app: 'Spotify'"},
+            ],
+        )
+
     @patch(
         "assistant.solution_agent.ask_with_tools",
         return_value=SimpleNamespace(text="I can't do that yet.", tool_call=None),
