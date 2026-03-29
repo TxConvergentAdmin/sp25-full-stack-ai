@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Screen Assistant</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #212121;
+        --panel: #2f2f2f;
+        --panel-strong: #303030;
+        --border: rgba(255, 255, 255, 0.12);
+        --text: #ffffff;
+        --muted: rgba(255, 255, 255, 0.62);
+        --accent: #ffffff;
+        --accent-text: #111111;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: auto;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "SF Pro Display", "Segoe UI", sans-serif;
+      }
+
+      body {
+        overflow: hidden;
+      }
+
+      .shell {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        padding: 12px 20px 18px;
+        background: var(--bg);
+      }
+
+      .drag-bar {
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        -webkit-app-region: drag;
+        app-region: drag;
+        user-select: none;
+      }
+
+      .drag-title {
+        font-size: 13px;
+        color: var(--muted);
+        letter-spacing: 0.01em;
+      }
+
+      .window-actions {
+        margin-left: auto;
+        display: flex;
+        gap: 8px;
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+      }
+
+      .icon-button {
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--text);
+        border-radius: 10px;
+        width: 32px;
+        height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .icon-button:hover {
+        background: #2b2b2b;
+        border-color: var(--border);
+      }
+
+      .answer-panel {
+        display: none;
+        min-height: 100px;
+        max-height: 420px;
+        overflow-y: auto;
+        padding: 4px 2px 0;
+        white-space: pre-wrap;
+        line-height: 1.6;
+        font-size: 15px;
+        color: var(--text);
+      }
+
+      .answer-panel.visible {
+        display: block;
+      }
+
+      .composer {
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 26px;
+        padding: 10px;
+      }
+
+      .question-input {
+        flex: 1;
+        resize: none;
+        min-height: 52px;
+        max-height: 140px;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        border-radius: 16px;
+        padding: 12px 14px;
+        font: inherit;
+        outline: none;
+      }
+
+      .question-input::placeholder {
+        color: var(--muted);
+      }
+
+      .ask-button {
+        height: 44px;
+        border: none;
+        border-radius: 999px;
+        padding: 0 18px;
+        background: var(--accent);
+        color: var(--accent-text);
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .voice-button {
+        height: 44px;
+        width: 44px;
+        border: none;
+        border-radius: 999px;
+        background: #3a3a3a;
+        color: var(--text);
+        font-size: 16px;
+        cursor: pointer;
+      }
+
+      .voice-button.recording {
+        background: #b3261e;
+      }
+
+      .ask-button:disabled {
+        opacity: 0.55;
+        cursor: wait;
+      }
+
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+        min-height: 16px;
+        padding: 0 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="drag-bar">
+        <div class="drag-title">Screen Assistant</div>
+        <div class="window-actions">
+          <button id="closeButton" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+      </div>
+
+      <div class="composer">
+        <textarea
+          id="questionInput"
+          class="question-input"
+          rows="1"
+          placeholder="Ask about what's on your screen..."
+        ></textarea>
+        <button id="voiceButton" class="voice-button" type="button" aria-label="Record voice">●</button>
+        <button id="askButton" class="ask-button" type="button">Ask</button>
+      </div>
+
+      <div id="answerPanel" class="answer-panel"></div>
+
+      <div id="statusText" class="status"></div>
+    </div>
+
+    <script>
+      const answerPanel = document.getElementById("answerPanel");
+      const askButton = document.getElementById("askButton");
+      const closeButton = document.getElementById("closeButton");
+      const questionInput = document.getElementById("questionInput");
+      const statusText = document.getElementById("statusText");
+      const voiceButton = document.getElementById("voiceButton");
+      let isRecording = false;
+
+      const resizeWindow = async () => {
+        const shell = document.querySelector(".shell");
+        const desiredHeight = Math.ceil(shell.getBoundingClientRect().height);
+        if (window.pywebview?.api?.resize_overlay) {
+          try {
+            await window.pywebview.api.resize_overlay(desiredHeight);
+          } catch (_) {
+            // Ignore bridge issues during browser-only testing.
+          }
+        }
+      };
+
+      const autoGrowInput = () => {
+        questionInput.style.height = "0px";
+        questionInput.style.height = `${Math.min(questionInput.scrollHeight, 140)}px`;
+      };
+
+      const setAnswer = async (text) => {
+        answerPanel.textContent = text;
+        answerPanel.classList.toggle("visible", Boolean(text.trim()));
+        await resizeWindow();
+      };
+
+      const setStatus = (text) => {
+        statusText.textContent = text;
+      };
+
+      const submitQuestion = async () => {
+        const question = questionInput.value.trim();
+        if (!question) {
+          setStatus("Enter a question to test the overlay.");
+          return;
+        }
+
+        askButton.disabled = true;
+        setStatus("Thinking...");
+
+        try {
+          const response = await fetch("/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question }),
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.detail || "Request failed.");
+          }
+
+          await setAnswer(payload.answer || "");
+          setStatus("");
+        } catch (error) {
+          setStatus(error.message || "Unable to reach the assistant.");
+        } finally {
+          askButton.disabled = false;
+        }
+      };
+
+      const sendNativeVoiceQuestion = async () => {
+        askButton.disabled = true;
+        voiceButton.disabled = true;
+        setStatus("Transcribing...");
+
+        try {
+          if (!window.pywebview?.api?.stop_voice_recording) {
+            throw new Error("Native voice recording is not available.");
+          }
+
+          const payload = await window.pywebview.api.stop_voice_recording();
+          if (payload.transcript) {
+            questionInput.value = payload.transcript;
+            autoGrowInput();
+          }
+
+          await setAnswer(payload.answer || "");
+          setStatus(payload.transcript ? `Heard: ${payload.transcript}` : "");
+        } catch (error) {
+          setStatus(error.message || "Unable to process voice input.");
+        } finally {
+          isRecording = false;
+          askButton.disabled = false;
+          voiceButton.disabled = false;
+          voiceButton.classList.remove("recording");
+        }
+      };
+
+      askButton.addEventListener("click", submitQuestion);
+      closeButton.addEventListener("click", () => {
+        if (window.pywebview?.api?.close_window) {
+          window.pywebview.api.close_window();
+        }
+      });
+      voiceButton.addEventListener("click", async () => {
+        try {
+          if (isRecording) {
+            await sendNativeVoiceQuestion();
+            return;
+          }
+
+          if (!window.pywebview?.api?.start_voice_recording) {
+            throw new Error("Native voice recording is not available.");
+          }
+
+          await window.pywebview.api.start_voice_recording();
+          isRecording = true;
+          voiceButton.classList.add("recording");
+          setStatus("Listening... click again to stop.");
+        } catch (error) {
+          isRecording = false;
+          voiceButton.classList.remove("recording");
+          setStatus(error.message || "Microphone permission failed.");
+        }
+      });
+
+      questionInput.addEventListener("input", async () => {
+        autoGrowInput();
+        await resizeWindow();
+      });
+
+      questionInput.addEventListener("keydown", async (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          await submitQuestion();
+        }
+      });
+
+      window.addEventListener("load", async () => {
+        autoGrowInput();
+        await resizeWindow();
+      });
+    </script>
+  </body>
+</html>
