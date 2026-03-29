@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re 
+from assistant.search import ask_groq_web_search
 
 from assistant.capture import CaptureResult
 from assistant.speech import DEFAULT_TRANSCRIPTION_MODEL, transcribe_audio
@@ -19,26 +21,26 @@ from assistant.vision import ask_groq_vision
 DEFAULT_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 # Stage 2: add this constant when you build keyword routing
-# WEB_SEARCH_TERMS = (
-#     "today",
-#     "latest",
-#     "current",
-#     "right now",
-#     "news",
-#     "weather",
-#     "forecast",
-#     "deal",
-#     "deals",
-#     "discount",
-#     "price",
-#     "prices",
-#     "sale",
-#     "stock",
-#     "score",
-#     "scores",
-#     "trending",
-#     "release date",
-# )
+WEB_SEARCH_TERMS = (
+    "today",
+    "latest",
+    "current",
+    "right now",
+    "news",
+    "weather",
+    "forecast",
+    "deal",
+    "deals",
+    "discount",
+    "price",
+    "prices",
+    "sale",
+    "stock",
+    "score",
+    "scores",
+    "trending",
+    "release date",
+)
 
 SYSTEM_PROMPT = (
     "You are a personal assistant. Give direct, concise answers. "
@@ -72,17 +74,35 @@ class ScreenAssistantAgent:
         # Stage 4: uncomment these when you add conversation memory
         # self.conversation_history: list[dict] = []
         # self.max_history = 10
+        def needs_web_search(self, question: str) -> bool:
+            lowered = question.lower()
+
+            if any(term in lowered for term in WEB_SEARCH_TERMS):
+                return True
+
+            if re.search(r"\b(best|recommend|compare|cheapest|near me)\b", lowered):
+                return True
+
+        return False
 
     def answer_question(self, *, question: str, capture: CaptureResult) -> AgentResult:
-        """Workshop starter version.
-        """
-        return AgentResult(
-            answer=(
-                "Stage 1 TODO: update assistant/agent.py so this method calls "
-                "ask_groq_vision() with the user's question and the screenshot."
-            ),
-            model=self.model,
+        if self.needs_web_search(question):
+            answer = ask_groq_web_search(api_key=self.api_key, question=question)
+            return AgentResult(answer=answer, model="groq/compound-mini")
+
+        user_prompt = (
+            f"User question: {question}\n"
+            f"Screenshot timestamp: {capture.captured_at}\n"
+            "Answer naturally and prioritize being helpful."
         )
+        answer = ask_groq_vision(
+            api_key=self.api_key,
+            model=self.model,
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            screenshot_png_bytes=capture.png_bytes,
+        )
+        return AgentResult(answer=answer, model=self.model)
 
     def answer_audio_question(
         self,
