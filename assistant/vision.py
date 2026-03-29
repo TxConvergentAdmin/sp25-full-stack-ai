@@ -33,20 +33,46 @@ def ask_groq_vision(
     system_prompt: str,
     user_prompt: str,
     screenshot_png_bytes: bytes,
+    history: list[dict] | None = None,
 ) -> str:
+    """Send a vision request to Groq with optional conversation history.
+
+    Args:
+        api_key: Groq API key.
+        model: Model name.
+        system_prompt: System instructions.
+        user_prompt: The user's question.
+        screenshot_png_bytes: PNG screenshot data.
+        history: Optional list of prior messages for conversation context.
+                 Each message should have "role" and "content" keys.
+                 Example: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+
+    Returns:
+        The assistant's response text.
+    """
     image_data_url = _prepare_image_data_url(screenshot_png_bytes)
+
+    # Build messages: system prompt, then history (if any), then current user message with image
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Insert conversation history before the current question
+    if history:
+        messages.extend(history)
+
+    # Add the current user message with the screenshot
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        }
+    )
+
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_prompt},
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                ],
-            },
-        ],
+        "messages": messages,
         "temperature": 0.2,
         "max_completion_tokens": 500,
     }

@@ -8,6 +8,11 @@ from assistant.search import ask_groq_web_search
 from assistant.speech import DEFAULT_TRANSCRIPTION_MODEL, transcribe_audio
 from assistant.vision import ask_groq_vision
 
+# Stage 3+: Import helpers when you need them
+# from assistant.helpers import ask_groq_chat  # For LLM-based classification
+# from assistant.helpers import retrieve_context  # For RAG
+# from assistant.helpers import ask_with_tools, execute_tool  # For MCP
+
 
 DEFAULT_GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 WEB_SEARCH_TERMS = (
@@ -59,7 +64,32 @@ class ScreenAssistantAgent:
         self.api_key = api_key
         self.model = model
 
+        # TODO Stage 4: Add conversation history
+        # self.conversation_history: list[dict] = []
+        # self.max_history = 10  # Keep last 10 exchanges
+
     def needs_web_search(self, question: str) -> bool:
+        """Determine if a question needs web search (vs vision).
+
+        TODO Stage 3: Replace this keyword-based routing with LLM classification.
+        Use ask_groq_chat() to classify questions more accurately:
+
+            def classify_question(self, question: str) -> str:
+                response = ask_groq_chat(
+                    api_key=self.api_key,
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": (
+                            "Classify this question as 'vision' (needs to see the screen) "
+                            "or 'search' (needs live web data). Reply with one word only."
+                        )},
+                        {"role": "user", "content": question},
+                    ],
+                    temperature=0.0,
+                    max_tokens=10,
+                )
+                return "search" if "search" in response.lower() else "vision"
+        """
         lowered = question.lower()
 
         # Route obviously time-sensitive or live-information questions to web search.
@@ -73,6 +103,33 @@ class ScreenAssistantAgent:
         return False
 
     def answer_question(self, *, question: str, capture: CaptureResult) -> AgentResult:
+        """Answer a question using the appropriate tool (vision, search, docs, or action).
+
+        TODO Stage 3: Replace needs_web_search() with classify_question() for smarter routing.
+        TODO Stage 5: Add "docs" route for RAG queries about the user's documents.
+        TODO Stage 6: Add "action" route for MCP tool calls (reminders, notes, etc.).
+
+        Example routing flow for Stage 5+:
+            route = self.classify_question(question)  # Returns "vision", "search", "docs", or "action"
+
+            if route == "search":
+                # ... web search path ...
+            elif route == "docs":
+                # Retrieve relevant chunks from user's documents
+                context_chunks = retrieve_context(question, top_k=3)
+                context = "\\n---\\n".join(context_chunks)
+                augmented_prompt = f"Context from user's docs:\\n{context}\\n\\nQuestion: {question}"
+                # ... vision call with augmented prompt ...
+            elif route == "action":
+                # Use MCP tools
+                response = ask_with_tools(api_key=self.api_key, model=self.model, question=question)
+                if response.tool_call:
+                    result = execute_tool(response.tool_call)
+                    return AgentResult(answer=f"Done! {result}", model=self.model)
+                return AgentResult(answer=response.text, model=self.model)
+            else:
+                # ... vision path ...
+        """
         # Minimal routing: use live web search for current-info questions, otherwise use vision.
         if self.needs_web_search(question):
             answer = ask_groq_web_search(api_key=self.api_key, question=question)
@@ -89,7 +146,17 @@ class ScreenAssistantAgent:
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
             screenshot_png_bytes=capture.png_bytes,
+            # TODO Stage 4: Pass conversation history
+            # history=self.conversation_history,
         )
+
+        # TODO Stage 4: Update conversation history after each exchange
+        # self.conversation_history.append({"role": "user", "content": question})
+        # self.conversation_history.append({"role": "assistant", "content": answer})
+        # # Trim to max history
+        # if len(self.conversation_history) > self.max_history * 2:
+        #     self.conversation_history = self.conversation_history[-(self.max_history * 2):]
+
         return AgentResult(answer=answer, model=self.model)
 
     def answer_audio_question(

@@ -1,3 +1,16 @@
 .env
 __pycache__/
 *.pyc
+
+AI_CONTEXT.md
+
+# RAG vector database (Stage 5)
+.chroma_db/
+
+# MCP tool outputs (Stage 6)
+reminders.json
+notes/*.txt
+!notes/.gitkeep
+
+#Solution -- hide this when releasing
+#assistant/solution_agent.py
