@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 
 AI_CONTEXT.md
+WORKSHOP_PLAN.md
+docs/WORKSHOP_FOLLOW_ALONG.md
 
 # RAG vector database (Stage 5)
 .chroma_db/

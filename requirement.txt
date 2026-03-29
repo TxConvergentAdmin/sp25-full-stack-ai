@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pywebview
+mss
+pillow
+httpx
+python-dotenv
+python-multipart
+sounddevice
+numpy
+chromadb
+sentence-transformers
+pymupdf
